@@ -1,7 +1,7 @@
 """
 🐕 Plateforme d'analyse statistique canine — version tout-en-un
 Descriptives, corrélations, ACP, ACM, FAMD, classification, prédiction,
-interprétation IA (DeepSeek / Kimi), rapport.
+interprétation IA via OpenRouter, rapport.
 """
 
 import io
@@ -30,10 +30,18 @@ st.set_page_config(page_title="Dogs Stats Platform", page_icon="🐕", layout="w
 NUMERIC_COLS = ["HW", "HR", "BL", "HL", "HEW", "ML", "HG",
                 "EL", "CG", "WG", "AG", "NL", "LW"]
 
-AI_PROVIDERS = {
-    "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-chat"},
-    "kimi":     {"base_url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k"},
-}
+OPENROUTER_MODELS = [
+    "deepseek/deepseek-chat-v3-0324:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "openai/gpt-4o-mini",
+    "anthropic/claude-3.5-sonnet",
+]
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324:free"
 
 
 # ----------------------------------------------------------------------------
@@ -43,7 +51,7 @@ def init_session_state():
     for k, v in {
         "df": None,
         "file_name": None,
-        "ai_provider": "deepseek",
+        "ai_model": OPENROUTER_DEFAULT_MODEL,
         "ai_api_key": "",
         "report_sections": [],
     }.items():
@@ -149,10 +157,9 @@ def correlation_matrix(df, cols, method="pearson"):
 
 
 # ----------------------------------------------------------------------------
-# PRINCE (ACP / ACM / FAMD) — API corrigée pour les versions récentes
+# PRINCE (ACP / ACM / FAMD)
 # ----------------------------------------------------------------------------
 def run_pca(df, cols, n_components=5):
-    """Prince centre et réduit en interne (rescale_with_std=True)."""
     pca = prince.PCA(
         n_components=n_components,
         n_iter=10,
@@ -177,11 +184,8 @@ def run_famd(df, num_cols, cat_cols, n_components=5):
 
 
 def safe_column_coords(obj):
-    """Récupère les coordonnées colonnes quelle que soit la version de prince."""
-    for attr in ("column_coordinates_",):
-        if hasattr(obj, attr):
-            return getattr(obj, attr)
-    # Anciennes versions : méthode
+    if hasattr(obj, "column_coordinates_"):
+        return getattr(obj, "column_coordinates_")
     try:
         return obj.column_coordinates()
     except Exception:
@@ -189,9 +193,8 @@ def safe_column_coords(obj):
 
 
 def safe_row_coords(obj):
-    for attr in ("row_coordinates_",):
-        if hasattr(obj, attr):
-            return getattr(obj, attr)
+    if hasattr(obj, "row_coordinates_"):
+        return getattr(obj, "row_coordinates_")
     try:
         return obj.row_coordinates()
     except Exception:
@@ -214,42 +217,46 @@ def safe_inertia(obj):
 
 
 # ----------------------------------------------------------------------------
-# AI INTERPRETER
+# AI INTERPRETER — OpenRouter
 # ----------------------------------------------------------------------------
 def ai_interpret(context: str, prompt: str) -> str:
-    provider = st.session_state.ai_provider
     api_key = st.session_state.ai_api_key
     if not api_key:
         try:
-            api_key = st.secrets.get(
-                "DEEPSEEK_API_KEY" if provider == "deepseek" else "KIMI_API_KEY",
-                "",
-            )
+            api_key = st.secrets.get("OPENROUTER_API_KEY", "")
         except Exception:
             api_key = ""
+
     if not api_key:
-        return "⚠️ Aucune clé API configurée. Renseignez-la dans la barre latérale."
+        return ("⚠️ Aucune clé API OpenRouter configurée. "
+                "Renseignez-la dans la barre latérale ou dans les secrets.")
 
     try:
         from openai import OpenAI
-        cfg = AI_PROVIDERS[provider]
-        client = OpenAI(api_key=api_key, base_url=cfg["base_url"])
+        client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
+
         system = (
             "Tu es un statisticien expert en morphométrie animale. "
             "Interprète les résultats fournis de manière rigoureuse, en citant "
             "les valeurs numériques pertinentes. Réponds en français, en 3 à 5 "
             "paragraphes structurés."
         )
+
         resp = client.chat.completions.create(
-            model=cfg["model"],
+            model=st.session_state.ai_model,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": f"Contexte :\n{context}\n\nDemande : {prompt}"},
+                {"role": "user",
+                 "content": f"Contexte :\n{context}\n\nDemande : {prompt}"},
             ],
+            extra_headers={
+                "HTTP-Referer": "https://dogs-stats.streamlit.app",
+                "X-OpenRouter-Title": "Dogs Stats Platform",
+            },
         )
         return resp.choices[0].message.content
     except Exception as e:
-        return f"❌ Erreur API : {e}"
+        return f"❌ Erreur API OpenRouter : {e}"
 
 
 def add_to_report(title: str, content: str):
@@ -276,17 +283,22 @@ with st.sidebar:
             st.error(f"Erreur : {e}")
 
     st.divider()
-    st.header("🤖 IA")
-    st.session_state.ai_provider = st.selectbox(
-        "Fournisseur", list(AI_PROVIDERS.keys())
+    st.header("🤖 IA (OpenRouter)")
+    st.session_state.ai_model = st.selectbox(
+        "Modèle",
+        OPENROUTER_MODELS,
+        index=OPENROUTER_MODELS.index(OPENROUTER_DEFAULT_MODEL),
+        help="Les modèles ':free' sont gratuits mais limités en débit.",
     )
     st.session_state.ai_api_key = st.text_input(
-        "Clé API", type="password",
-        help="Stockée en session uniquement. Sur Streamlit Cloud, utilisez st.secrets.",
+        "Clé API OpenRouter",
+        type="password",
+        help="Format : sk-or-v1-...  —  https://openrouter.ai/keys",
     )
+    st.caption("Clé stockée en session uniquement.")
 
     st.divider()
-    st.caption("v1.0 — Streamlit + prince + plotly")
+    st.caption("v1.0 — Streamlit + prince + plotly + OpenRouter")
 
 
 # ----------------------------------------------------------------------------
@@ -304,7 +316,7 @@ if df is None:
     - **ACP / ACM / FAMD** : analyses factorielles complètes
     - **Classification** : CAH, k-means, DBSCAN
     - **Prédiction** : LDA, Random Forest, importance des variables
-    - **Interprétation IA** : DeepSeek ou Kimi
+    - **Interprétation IA** : via OpenRouter (DeepSeek, Llama, Gemini, Qwen...)
     - **Rapport** : export Markdown + synthèse narrative IA
     """)
     st.stop()
@@ -465,12 +477,9 @@ with tabs[3]:
                                  default=cat_in_df, key="mca_vars")
         if len(cat_sel) >= 2:
             try:
-                mca = run_mca(df, cat_sel, n_components=min(5, 5))
+                mca = run_mca(df, cat_sel, n_components=5)
                 eig = safe_eigenvalues(mca)[:5]
-                if eig.sum() > 0:
-                    pct = (100 * eig / eig.sum()).round(2)
-                else:
-                    pct = np.zeros_like(eig)
+                pct = (100 * eig / eig.sum()).round(2) if eig.sum() > 0 else np.zeros_like(eig)
 
                 st.subheader("Valeurs propres")
                 st.dataframe(pd.DataFrame({
@@ -514,10 +523,7 @@ with tabs[4]:
         try:
             famd = run_famd(df, num_sel, cat_sel2)
             eig = safe_eigenvalues(famd)[:5]
-            if eig.sum() > 0:
-                pct = (100 * eig / eig.sum()).round(2)
-            else:
-                pct = np.zeros_like(eig)
+            pct = (100 * eig / eig.sum()).round(2) if eig.sum() > 0 else np.zeros_like(eig)
 
             st.dataframe(pd.DataFrame({
                 "Axe": [f"F{i+1}" for i in range(len(eig))],
@@ -567,10 +573,8 @@ with tabs[5]:
         labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(X)
 
         st.subheader("Méthode du coude")
-        inertias = []
-        for i in range(2, 9):
-            inertias.append(KMeans(n_clusters=i, n_init=10,
-                                   random_state=42).fit(X).inertia_)
+        inertias = [KMeans(n_clusters=i, n_init=10, random_state=42).fit(X).inertia_
+                    for i in range(2, 9)]
         st.line_chart(pd.DataFrame({"k": list(range(2, 9)),
                                     "inertie": inertias}).set_index("k"))
 
@@ -592,10 +596,8 @@ with tabs[5]:
         st.dataframe(counts, use_container_width=True)
 
         if st.button("➕ Ajouter au rapport", key="add_clust"):
-            add_to_report(
-                "Classification",
-                f"Méthode : {method_cl}\n\n" + counts.to_markdown(),
-            )
+            add_to_report("Classification",
+                          f"Méthode : {method_cl}\n\n" + counts.to_markdown())
             st.success("Ajouté.")
 
 
@@ -610,7 +612,6 @@ with tabs[6]:
         X = df[numeric_in_df].values
         y = df[target].astype(str).values
 
-        # Retirer les classes trop petites pour la stratification
         cls, cnt = np.unique(y, return_counts=True)
         valid_classes = cls[cnt >= 2]
         mask = np.isin(y, valid_classes)
@@ -621,7 +622,6 @@ with tabs[6]:
         else:
             model_name = st.selectbox("Modèle", ["LDA", "Random Forest"],
                                       key="pred_model")
-
             try:
                 X_tr, X_te, y_tr, y_te = train_test_split(
                     X, y, test_size=0.3, random_state=42, stratify=y
@@ -659,11 +659,9 @@ with tabs[6]:
                     st.bar_chart(imp.set_index("Variable"))
 
                 if st.button("➕ Ajouter au rapport", key="add_pred"):
-                    add_to_report(
-                        "Prédiction",
-                        f"Cible : {target} — Modèle : {model_name} — Accuracy : {acc:.3f}\n\n"
-                        + report,
-                    )
+                    add_to_report("Prédiction",
+                                  f"Cible : {target} — Modèle : {model_name} — "
+                                  f"Accuracy : {acc:.3f}\n\n" + report)
                     st.success("Ajouté.")
             except Exception as e:
                 st.error(f"Erreur prédiction : {e}")
